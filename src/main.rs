@@ -1,9 +1,11 @@
+use crate::xstd_pcw::MitData;
 use crate::xstd_pcw::MotorControlMode;
 use crate::xstd_pcw::XstdPcw;
 use clap::Parser;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use log::error;
+use log::info;
 use socketcan::tokio::CanFdSocket;
 use socketcan::CanFilter;
 use socketcan::SocketOptions;
@@ -58,22 +60,27 @@ async fn main() {
     let canbus = args.can_interface.clone();
     // Spawn message process thread
     for pcw in pcws.clone() {
-        let (mut tx, mut rx) = {
+        // Initialize PCW
+        {
             let canbus = CanFdSocket::open(canbus.as_str()).unwrap();
-            let filter = CanFilter::new(
-                (pcw.lock().await.get_canopen_id() as u16 | 0b0011_0000000) as u32,
-                0x1FF,
-            );
+            let (mut tx, _) = canbus.split();
+            pcw.lock().await.initialize(&mut tx).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pcw_arc = pcw.clone();
+        let (_, mut rx) = {
+            let canbus = CanFdSocket::open(canbus.as_str()).unwrap();
+            let filter = CanFilter::new(pcw.lock().await.get_canopen_id() as u16 as u32, 0x7F);
             canbus.set_filters(&[filter]).unwrap();
             canbus.split()
         };
-        pcw.lock().await.initialize(&mut tx).await;
-        let pcw_arc = pcw.clone();
         tokio::spawn(async move {
             loop {
                 let f = rx.next().await.unwrap().unwrap();
                 {
-                    let _ = pcw_arc.lock().await.process_can_msg(f).await;
+                    if let Err(e) = pcw_arc.lock().await.process_can_msg(f) {
+                        error!("Error processing CAN message: {:?}", e);
+                    }
                 }
             }
         });
@@ -85,8 +92,13 @@ async fn main() {
         // TODO as user, change these targets to control the PCW
         // For example, use gilrs with a gamepad, or use ros to recieve and calculate speed, etc.
         // Here for the sake of simplicity, we just set the targets to Speed 1.0
+        // We provide a few examples here, uncomment the ones you want to use
         let mt1_target = MotorControlMode::Speed(1.0);
         let mt2_target = MotorControlMode::Speed(1.0);
+        // let mt1_target = MotorControlMode::Mit(MitData::torque(1.0));
+        // let mt2_target = MotorControlMode::Mit(MitData::torque(1.0));
+        // let mt1_target = MotorControlMode::Mit(MitData::new(0.0, 1.0, 0.0, 1.0, 0.0));
+        // let mt2_target = MotorControlMode::Mit(MitData::new(0.0, 1.0, 0.0, 1.0, 0.0));
         loop {
             tokio::time::sleep(Duration::from_millis(10)).await;
             pcw_arcs[0]
