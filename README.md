@@ -25,6 +25,11 @@ In case you don't have tools to read/write OD, you can use CANOpenLinux to do so
 
 ## Python
 
+1. Make sure everything in common setup is done.
+2. Run `pip3 install -r requirements.txt` to install the required dependencies.
+3. Currently, this script only supports the default CAN interface (can0). To run the script, use the following command:`python3 main.py`
+4. Watch it rotate
+
 ## Rust
 
 1. Make sure everything in common setup is done.
