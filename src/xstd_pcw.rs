@@ -80,16 +80,6 @@ impl MitData {
             t_ff as u8,
         ]
     }
-    // Generate a mit complex with torque only
-    pub fn torque(t: f32) -> Self {
-        Self {
-            kp: 0.0,
-            kd: 0.0,
-            p: 0.0,
-            v: 0.0,
-            t_ff: t,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -178,13 +168,7 @@ impl XstdPcw {
     pub fn get_canopen_id(&self) -> u8 {
         self.canopen_id
     }
-    pub fn uint_to_float(x: u32, x_min: f32, x_max: f32, bits: u32) -> f32 {
-        // Converts an unsigned int to a float, given range and number of bits
-        let span = x_max - x_min;
-        let offset = x_min;
-        let scale = ((1 << bits) - 1) as f32;
-        x as f32 * span / scale + offset
-    }
+
     pub fn float_to_uint(x: f32, x_min: f32, x_max: f32, bits: u32) -> u32 {
         // Converts a float to an unsigned int, given range and number of bits
         let span = x_max - x_min;
@@ -192,6 +176,21 @@ impl XstdPcw {
         let scale = ((1 << bits) - 1) as f32;
         ((x - offset) * scale / span) as u32
     }
+
+    fn float_to_i16(x: f32, x_min: f32, x_max: f32) -> i16 {
+        let x = x.clamp(x_min, x_max);
+        let scale = 65534.0f32; // 32767 * 2
+        let span = x_max - x_min;
+        (((x - x_min) as f32 * scale / span) - 32767.0f32) as i16
+    }
+
+    fn i16_to_float(x: i16, x_min: f32, x_max: f32) -> f32 {
+        let x = if x == -32768 { -32767 } else { x };
+        let scale = 65534.0f32; // 32767 * 2
+        let span = x_max - x_min;
+        x_min + (x as f32 + 32767.0f32) * span / scale
+    }
+
     pub fn new(canopen_id: u8) -> Self {
         Self {
             canopen_id,
@@ -253,34 +252,16 @@ impl XstdPcw {
                 i32::from_le_bytes([msg.data()[0], msg.data()[1], msg.data()[2], msg.data()[3]]);
             let m1_pos =
                 i32::from_le_bytes([msg.data()[4], msg.data()[5], msg.data()[6], msg.data()[7]]);
-            let m0_speed = u16::from_le_bytes([msg.data()[8], msg.data()[9]]);
-            let m1_speed = u16::from_le_bytes([msg.data()[10], msg.data()[11]]);
-            let m0_speed = Self::uint_to_float(
-                m0_speed as u32,
-                m0_speed_mapping_min,
-                m0_speed_mapping_max,
-                16,
-            );
-            let m1_speed = Self::uint_to_float(
-                m1_speed as u32,
-                m1_speed_mapping_min,
-                m1_speed_mapping_max,
-                16,
-            );
-            let m0_torque = u16::from_le_bytes([msg.data()[12], msg.data()[13]]);
-            let m1_torque = u16::from_le_bytes([msg.data()[14], msg.data()[15]]);
-            let m0_torque = Self::uint_to_float(
-                m0_torque as u32,
-                m0_torque_mapping_min,
-                m0_torque_mapping_max,
-                16,
-            );
-            let m1_torque = Self::uint_to_float(
-                m1_torque as u32,
-                m1_torque_mapping_min,
-                m1_torque_mapping_max,
-                16,
-            );
+            let m0_speed = i16::from_le_bytes([msg.data()[8], msg.data()[9]]);
+            let m1_speed = i16::from_le_bytes([msg.data()[10], msg.data()[11]]);
+            let m0_speed = Self::i16_to_float(m0_speed, m0_speed_mapping_min, m0_speed_mapping_max);
+            let m1_speed = Self::i16_to_float(m1_speed, m1_speed_mapping_min, m1_speed_mapping_max);
+            let m0_torque = i16::from_le_bytes([msg.data()[12], msg.data()[13]]);
+            let m1_torque = i16::from_le_bytes([msg.data()[14], msg.data()[15]]);
+            let m0_torque =
+                Self::i16_to_float(m0_torque, m0_torque_mapping_min, m0_torque_mapping_max);
+            let m1_torque =
+                Self::i16_to_float(m1_torque, m1_torque_mapping_min, m1_torque_mapping_max);
             let m0_read_mode = MotorControlMode::try_from(msg.data()[16])?;
             let m1_read_mode = MotorControlMode::try_from(msg.data()[17])?;
             self.read_control_modes[0] = m0_read_mode;
@@ -351,22 +332,20 @@ impl XstdPcw {
                         data.extend_from_slice(&d);
                     }
                     MotorControlMode::Speed(s) => {
-                        let s = Self::float_to_uint(
+                        let s = Self::float_to_i16(
                             *s,
                             pcw.speed_mapping_mins[i],
                             pcw.speed_mapping_maxs[i],
-                            16,
-                        ) as u16;
+                        );
                         let d = s.to_le_bytes();
                         data.extend_from_slice(&d);
                     }
                     MotorControlMode::Torque(t) => {
-                        let t = Self::float_to_uint(
+                        let t = Self::float_to_i16(
                             *t,
                             pcw.torque_mapping_mins[i],
                             pcw.torque_mapping_maxs[i],
-                            16,
-                        ) as u16;
+                        );
                         let d = t.to_le_bytes();
                         data.extend_from_slice(&d);
                     }
