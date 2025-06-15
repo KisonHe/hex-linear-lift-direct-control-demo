@@ -216,7 +216,7 @@ impl XstdPcw {
             Id::Standard(id) => id.as_raw(),
             Id::Extended(_) => return Ok(()),
         };
-        if id & 0b0111_0000000 == 0b1110_0000000 {
+        if id & 0b1111_0000000 == 0b1110_0000000 {
             // HEARTBEAT
             if msg.data().len() < 1 {
                 return Err(());
