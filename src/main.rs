@@ -93,10 +93,14 @@ async fn main() {
         // For example, use gilrs with a gamepad, or use ros to recieve and calculate speed, etc.
         // Here for the sake of simplicity, we just set the targets to Speed 1.0
         // We provide a few examples here, uncomment the ones you want to use
+        // let mt1_target = MotorControlMode::Lock;
+        // let mt2_target = MotorControlMode::Lock;
         let mt1_target = MotorControlMode::Speed(1.0);
         let mt2_target = MotorControlMode::Speed(1.0);
-        // let mt1_target = MotorControlMode::Mit(MitData::torque(1.0));
-        // let mt2_target = MotorControlMode::Mit(MitData::torque(1.0));
+        // let mt1_target = MotorControlMode::Mit(MitData::torque(2.0)); // This will keep acceletating! Dangerous!
+        // let mt2_target = MotorControlMode::Mit(MitData::torque(2.0)); // This will keep acceletating! Dangerous!
+        // let mt1_target = MotorControlMode::Mit(MitData::torque(0.0)); // 0 Output torque means you can move the motor freely, convenient when you need to let user move vehicles with handrail or something
+        // let mt2_target = MotorControlMode::Mit(MitData::torque(0.0)); // 0 Output torque means you can move the motor freely, convenient when you need to let user move vehicles with handrail or something
         // let mt1_target = MotorControlMode::Mit(MitData::new(0.0, 1.0, 0.0, 1.0, 0.0));
         // let mt2_target = MotorControlMode::Mit(MitData::new(0.0, 1.0, 0.0, 1.0, 0.0));
         loop {
@@ -114,7 +118,7 @@ async fn main() {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (mut tx, _) = {
         let canbus = CanFdSocket::open(canbus.as_str()).unwrap();
-        let filter = CanFilter::new(0 as u32, 0x1FF);
+        let filter = CanFilter::new(0 as u32, 0x7FF);
         canbus.set_filters(&[filter]).unwrap();
         canbus.split()
     };
