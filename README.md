@@ -9,11 +9,10 @@ This demo will only control one pcw. Make sure you set the object dictionary of 
 3. Make sure the OD settings are correct. (This only has to be done once) For this example, 0x3A01-00 should be 1, 0x3A02-00 should be 0. For meaning of these numbers, check our documentation website.
 
 ### Change default OD settings to your custom settings using CANOpenLinux
+> ***If you don't plan to change default settings, you should skip this step.*** This step is only needed if you want to change the OD settings.
+> 
 > By default, the 0x3A01-00 is 1, 0x3A02-00 is 0. 
-> 
-> ***So if you don't plan to change default settings, you should skip this step.***
-> 
-> This step is only needed if you want to change the OD settings.
+
 In case you don't have tools to read/write OD, you can use CANOpenLinux to do so.
 
 1. Clone the repo using `git clone https://github.com/CANopenNode/CANopenLinux.git --recursive`
@@ -27,12 +26,16 @@ In case you don't have tools to read/write OD, you can use CANOpenLinux to do so
 
 ![CANOpenLinux](./CANOpenLinux.png)
 
+---
+
 ## Python
+> This demo uses asyncio. If your python version is too old, it will not work.
 
 1. Make sure everything in common setup is done.
-2. Run `pip3 install -r requirements.txt` to install the required dependencies.
-3. Currently, this script only supports the default CAN interface (can0). To run the script, use the following command:`python3 main.py`
-4. Watch it rotate
+2. Run `pip3 install -r requirements.txt` to install the required dependencies. Using venv is ok.
+3. Change `bus = can.Bus(channel='can0', bustype='socketcan', fd=True)` in main.py to your can interface.
+4. Run `python3 main.py` to start the script.
+5. Watch it rotate
 
 ## Rust
 
