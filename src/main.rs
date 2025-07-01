@@ -162,4 +162,6 @@ async fn main() {
             std::process::exit(0);
         }
     }
+    // Avoid exiting before ws buffer is flushed
+    tokio::time::sleep(Duration::from_secs(1)).await;
 }
