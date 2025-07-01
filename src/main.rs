@@ -1,24 +1,53 @@
-use crate::xstd_pcw::MitData;
-use crate::xstd_pcw::MotorControlMode;
-use crate::xstd_pcw::XstdPcw;
 use clap::Parser;
+use clap::Subcommand;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
+use log::debug;
 use log::error;
 use log::info;
-use socketcan::tokio::CanFdSocket;
-use socketcan::CanFilter;
-use socketcan::SocketOptions;
+use log::trace;
+use log::warn;
+use prost::Message;
+use serde::Deserialize;
+use serde::Serialize;
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::{
+    protocol::{frame::coding::CloseCode, CloseFrame},
+    Message as WsMessage,
+};
+use tokio_tungstenite::MaybeTlsStream;
 
-mod xstd_pcw;
+pub mod base_backend {
+    include!(concat!(env!("OUT_DIR"), "/_.rs"));
+}
 
-#[derive(Parser, Debug, Clone)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Can interface name, e.g. can0
-    #[arg(long, short)]
-    can_interface: String,
+#[derive(Debug, Parser)]
+struct Cli {
+    #[arg(help = "WebSocket URL to connect to (e.g. ws://localhost:8080)")]
+    url: String,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+#[clap(disable_help_subcommand = true)]
+enum Commands {
+    #[command(about = "Print info and do nothing")]
+    Print,
+    #[command(about = "Ask the lift to calibrate")]
+    Calibrate,
+    #[command(about = "Brake the lift")]
+    Brake,
+    #[command(about = "Move the lift to a position")]
+    Move {
+        #[arg(help = "Position to move to (in pulses)")]
+        position: i64,
+    },
+    #[command(about = "Set the speed of the lift")]
+    SetSpeed {
+        #[arg(help = "Speed to set (in pulses per second)")]
+        speed: u32,
+    },
 }
 
 #[tokio::main]
@@ -27,112 +56,110 @@ async fn main() {
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
 
-    let args = Args::parse();
+    let args = Cli::parse();
 
-    // Check if the interface exists
-    let interfaces = socketcan::available_interfaces().expect("Error getting can interfaces");
-    if !interfaces.contains(&args.can_interface) {
-        error!("Required interface {} not found", &args.can_interface);
-        std::process::exit(1);
-    }
-    // Check if interface is up. Bring up can bus might require root privileges, which is not ideal. So we just panic if it's down.
-    {
-        let ifi = nix::net::if_::if_nametoindex(args.can_interface.as_str())
-            .expect("Error opening can bus");
-        let interface = socketcan::CanInterface::open_iface(ifi);
-        let d = interface
-            .details()
-            .expect("Failed to get interface details");
-        if !d.is_up {
-            error!("Interface {} is down", args.can_interface);
-            std::process::exit(1);
-        }
-    }
+    ctrlc::set_handler(move || {
+        std::process::exit(0);
+    })
+    .expect("Error setting Ctrl-C handler");
 
-    // CAN bus should be ready by now
-    let pcws = [
-        // In this demo, we will only control one pcw
-        std::sync::Arc::new(tokio::sync::Mutex::new(XstdPcw::new(0x10))),
-        // std::sync::Arc::new(tokio::sync::Mutex::new(XstdPcw::new(0x11))),
-        // std::sync::Arc::new(tokio::sync::Mutex::new(XstdPcw::new(0x12))),
-        // std::sync::Arc::new(tokio::sync::Mutex::new(XstdPcw::new(0x13))),
-    ];
-    let canbus = args.can_interface.clone();
-    // Spawn message process thread
-    for pcw in pcws.clone() {
-        // Initialize PCW
-        {
-            let canbus = CanFdSocket::open(canbus.as_str()).unwrap();
-            let (mut tx, _) = canbus.split();
-            pcw.lock().await.initialize(&mut tx).await;
+    let url = args.url;
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    match ws_stream.get_ref() {
+        MaybeTlsStream::Plain(stream) => {
+            stream.set_nodelay(true).unwrap();
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let pcw_arc = pcw.clone();
-        let (_, mut rx) = {
-            let canbus = CanFdSocket::open(canbus.as_str()).unwrap();
-            let filter = CanFilter::new(pcw.lock().await.get_canopen_id() as u16 as u32, 0x7F);
-            canbus.set_filters(&[filter]).unwrap();
-            canbus.split()
-        };
-        tokio::spawn(async move {
-            loop {
-                let f = rx.next().await.unwrap().unwrap();
-                {
-                    if let Err(e) = pcw_arc.lock().await.process_can_msg(f) {
-                        error!("Error processing CAN message: {:?}", e);
+        _ => warn!("set_nodelay not implemented for TLS streams"),
+    }
+    match args.command {
+        Commands::Print => {
+            while let Some(msg) = ws_stream.next().await {
+                let msg = msg.unwrap();
+                match msg {
+                    WsMessage::Text(txt) => {
+                        info!("Text message: {:?}", txt);
                     }
+                    WsMessage::Binary(bin) => {
+                        let msg = base_backend::ApiUp::decode(bin.to_vec().as_slice()).unwrap();
+                        if let Some(status) = msg.status {
+                            match status {
+                                base_backend::api_up::Status::LinearLiftStatus(lift_status) => {
+                                    info!("Received lift status: {:?}", lift_status);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    WsMessage::Close(frame) => {
+                        debug!("Remote close message: {:?}", frame);
+                        break;
+                    }
+                    _ => {}
                 }
             }
-        });
-    }
-
-    // PCW Control Command Receive Thread
-    let pcw_arcs = pcws.clone();
-    tokio::spawn(async move {
-        // TODO as user, change these targets to control the PCW
-        // For example, use gilrs with a gamepad, or use ros to recieve and calculate speed, etc.
-        // Here for the sake of simplicity, we just set the targets to Speed 1.0
-        // We provide a few examples here, uncomment the ones you want to use
-        // let mt1_target = MotorControlMode::Lock;
-        // let mt2_target = MotorControlMode::Lock;
-        let mt1_target = MotorControlMode::Speed(1.0);
-        let mt2_target = MotorControlMode::Speed(1.0);
-        // let mt1_target = MotorControlMode::Mit(MitData::torque(2.0)); // This will keep acceletating! Dangerous!
-        // let mt2_target = MotorControlMode::Mit(MitData::torque(2.0)); // This will keep acceletating! Dangerous!
-        // let mt1_target = MotorControlMode::Mit(MitData::torque(0.0)); // 0 Output torque means you can move the motor freely, convenient when you need to let user move vehicles with handrail or something
-        // let mt2_target = MotorControlMode::Mit(MitData::torque(0.0)); // 0 Output torque means you can move the motor freely, convenient when you need to let user move vehicles with handrail or something
-        // let mt1_target = MotorControlMode::Mit(MitData::new(0.0, 1.0, 0.0, 1.0, 0.0));
-        // let mt2_target = MotorControlMode::Mit(MitData::new(0.0, 1.0, 0.0, 1.0, 0.0));
-        loop {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            pcw_arcs[0]
-                .lock()
-                .await
-                .set_control_mode([mt1_target, mt2_target]);
         }
-    });
-
-    // PCW Control Command Send Thread
-    // Set to your desired control frequency. Here we use 50Hz.
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let (mut tx, _) = {
-        let canbus = CanFdSocket::open(canbus.as_str()).unwrap();
-        let filter = CanFilter::new(0 as u32, 0x7FF);
-        canbus.set_filters(&[filter]).unwrap();
-        canbus.split()
-    };
-    loop {
-        tick.tick().await;
-        {
-            let f = XstdPcw::generate_control_frame(&[
-                pcws[0].lock().await.clone(),
-                // pcws[1].lock().await.clone(),
-                // pcws[2].lock().await.clone(),
-                // pcws[3].lock().await.clone(),
-            ])
-            .await;
-            tx.send(f).await.unwrap();
+        // Send calibrate command and quit
+        Commands::Calibrate => {
+            let linear_lift_command = base_backend::LinearLiftCommand {
+                command: Some(base_backend::linear_lift_command::Command::Calibrate(true)),
+            };
+            let cmd = base_backend::ApiDown {
+                down: Some(base_backend::api_down::Down::LinearLiftCommand(
+                    linear_lift_command,
+                )),
+            };
+            ws_stream
+                .send(WsMessage::Binary(cmd.encode_to_vec().into()))
+                .await
+                .unwrap();
+            std::process::exit(0);
+        }
+        Commands::Brake => {
+            let linear_lift_command = base_backend::LinearLiftCommand {
+                command: Some(base_backend::linear_lift_command::Command::Brake(true)),
+            };
+            let cmd = base_backend::ApiDown {
+                down: Some(base_backend::api_down::Down::LinearLiftCommand(
+                    linear_lift_command,
+                )),
+            };
+            ws_stream
+                .send(WsMessage::Binary(cmd.encode_to_vec().into()))
+                .await
+                .unwrap();
+            std::process::exit(0);
+        }
+        Commands::Move { position } => {
+            let linear_lift_command = base_backend::LinearLiftCommand {
+                command: Some(base_backend::linear_lift_command::Command::TargetPos(
+                    position,
+                )),
+            };
+            let cmd = base_backend::ApiDown {
+                down: Some(base_backend::api_down::Down::LinearLiftCommand(
+                    linear_lift_command,
+                )),
+            };
+            ws_stream
+                .send(WsMessage::Binary(cmd.encode_to_vec().into()))
+                .await
+                .unwrap();
+            std::process::exit(0);
+        }
+        Commands::SetSpeed { speed } => {
+            let linear_lift_command = base_backend::LinearLiftCommand {
+                command: Some(base_backend::linear_lift_command::Command::SetSpeed(speed)),
+            };
+            let cmd = base_backend::ApiDown {
+                down: Some(base_backend::api_down::Down::LinearLiftCommand(
+                    linear_lift_command,
+                )),
+            };
+            ws_stream
+                .send(WsMessage::Binary(cmd.encode_to_vec().into()))
+                .await
+                .unwrap();
+            std::process::exit(0);
         }
     }
 }
